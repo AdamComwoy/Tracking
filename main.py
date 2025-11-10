@@ -2,131 +2,178 @@ import time
 import cv2
 import mediapipe as mp
 
+# --- MediaPipe moduly ---
 mp_hands = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
-mp_styles = mp.solutions.drawing_styles
+mp_face = mp.solutions.face_mesh
+mp_draw = mp.solutions.drawing_utils
 
-# Hrubšie kreslenie kostry
-LANDMARK_STYLE = mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=2)
-CONNECTION_STYLE = mp_drawing.DrawingSpec(color=(255, 255, 255), thickness=2)
+# ---------- UI: trackbary ----------
+def on_trackbar(_=None):
+    pass
 
-FINGER_TIPS = [4, 8, 12, 16, 20]  # thumb, index, middle, ring, pinky
+def create_controls():
+    cv2.namedWindow("Controls", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("Controls", 520, 280)
+    # krátke názvy, aby OpenCV nestrihalo text
+    cv2.createTrackbar("Det%",   "Controls", 50, 100, on_trackbar)  # 0..1
+    cv2.createTrackbar("Track%", "Controls", 50, 100, on_trackbar)  # 0..1
+    cv2.createTrackbar("Hands",  "Controls", 2,    2,  on_trackbar) # 1..2
+    cv2.createTrackbar("Face",   "Controls", 1,    1,  on_trackbar) # 0/1
+    cv2.createTrackbar("Scale%", "Controls", 60, 100, on_trackbar)  # 30..100
+    cv2.createTrackbar("Thick",  "Controls", 2,    4,  on_trackbar) # 1..4
 
+def get_trackbar_values():
+    det_c = cv2.getTrackbarPos("Det%", "Controls") / 100.0
+    trk_c = cv2.getTrackbarPos("Track%", "Controls") / 100.0
+    max_hands = max(1, cv2.getTrackbarPos("Hands", "Controls"))
+    face_on = cv2.getTrackbarPos("Face", "Controls")
+    proc_scale = max(30, cv2.getTrackbarPos("Scale%", "Controls"))
+    draw_th = max(1, cv2.getTrackbarPos("Thick", "Controls"))
+    return det_c, trk_c, max_hands, face_on, proc_scale, draw_th
 
-def count_raised_fingers(landmarks, handed_label: str) -> int:
-    """
-    landmarks: MediaPipe landmarks (21 bodov), normalizované .x/.y (0..1)
-    handed_label: 'Left' alebo 'Right' (z MediaPipe handedness)
-    Heuristika:
-      - index, middle, ring, pinky: TIP.y < PIP.y
-      - thumb: pre 'Right' TIP.x > IP.x, pre 'Left' TIP.x < IP.x
-    """
-    if not landmarks or len(landmarks) != 21:
+# ---------- Pomocné ----------
+def put_text(img, text, org, scale=0.8, color=(255, 255, 255), thick=2):
+    cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick, cv2.LINE_AA)
+
+def count_fingers(lm, label):
+    """Heuristika: TIP.y < PIP.y pre 4 prsty; palec podľa handedness (TIP x vs IP x)."""
+    if not lm or len(lm) != 21:
         return 0
-
     up = 0
-
-    # 4 prsty (okrem palca)
-    for tip in [8, 12, 16, 20]:
-        pip_idx = tip - 2
-        if landmarks[tip].y < landmarks[pip_idx].y:
+    for tip in [8, 12, 16, 20]:  # index, middle, ring, pinky
+        if lm[tip].y < lm[tip - 2].y:
             up += 1
-
-    # palec (TIP 4 vs IP 3)
-    tip = 4
-    ip = 3
-    if handed_label == "Right":
-        if landmarks[tip].x > landmarks[ip].x:
-            up += 1
-    else:  # 'Left'
-        if landmarks[tip].x < landmarks[ip].x:
-            up += 1
-
+    # palec (4 vs 3)
+    if label == "Right" and lm[4].x > lm[3].x:
+        up += 1
+    if label == "Left" and lm[4].x < lm[3].x:
+        up += 1
     return up
 
-
-def put_text(img, text, org, scale=0.8, color=(255, 255, 255), thickness=2):
-    cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
-
-
+# ---------- Hlavný program ----------
 def main(camera_index: int = 0):
+    """Demo: ruky (povinne) + voliteľne FaceMesh, všetko na CPU (model_complexity=0)."""
+    create_controls()
+
     cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
     if not cap.isOpened():
-        print(f"⚠️  Kamera sa nedá otvoriť (index {camera_index}).")
+        print(f" Kamera sa nedá otvoriť (index {camera_index}).")
         return
 
-    # voliteľne nižšie rozlíšenie pre plynulejší beh
-    # cap.set(3, 640); cap.set(4, 480)
+    # vyššie rozlíšenie náhľadu; spracovanie riadi Scale%
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
-    prev_time = time.time()
+    hands = None
+    face = None
+    prev_params = None
+    prev_t = time.time()
     fps = 0.0
 
-    with mp_hands.Hands(
-        model_complexity=1,
-        max_num_hands=2,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-    ) as hands:
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                print("⚠️  Nedá sa čítať snímok z kamery.")
-                break
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            print("⚠️  Nedá sa čítať snímok z kamery.")
+            break
 
-            frame = cv2.flip(frame, 1)  # selfie
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            rgb.flags.writeable = False
-            results = hands.process(rgb)
-            rgb.flags.writeable = True
+        frame = cv2.flip(frame, 1)  # selfie
+        H, W = frame.shape[:2]
 
-            total = 0
+        # UI hodnoty
+        det_c, trk_c, max_hands, face_on, proc_scale, draw_th = get_trackbar_values()
 
-            # Kresli kostru a per-hand počítanie
-            if results.multi_hand_landmarks:
-                for landmarks, handed in zip(
-                    results.multi_hand_landmarks, results.multi_handedness
-                ):
-                    label = handed.classification[0].label  # 'Left' / 'Right'
-                    count = count_raised_fingers(landmarks.landmark, label)
-                    total += count
+        # (Re)inicializácia MediaPipe pri zmene parametrov
+        params = (det_c, trk_c, max_hands, face_on)
+        if params != prev_params:
+            if hands:
+                hands.close()
+            if face:
+                face.close()
 
-                    # kostra – hrubšie čiary
-                    mp_drawing.draw_landmarks(
-                        frame,
-                        landmarks,
-                        mp_hands.HAND_CONNECTIONS,
-                        LANDMARK_STYLE,
-                        CONNECTION_STYLE,
-                    )
+            hands = mp_hands.Hands(
+                model_complexity=0,               # CPU-friendly model
+                max_num_hands=max_hands,
+                min_detection_confidence=det_c,
+                min_tracking_confidence=trk_c,
+            )
+            face = (
+                mp_face.FaceMesh(
+                    max_num_faces=1,
+                    refine_landmarks=True,
+                    min_detection_confidence=det_c,
+                    min_tracking_confidence=trk_c,
+                )
+                if face_on
+                else None
+            )
+            prev_params = params
 
-                    # vypočítaj bounding box ~ z landmarkov, aby sme vedeli kam dať text
-                    h, w = frame.shape[:2]
-                    xs = [int(p.x * w) for p in landmarks.landmark]
-                    ys = [int(p.y * h) for p in landmarks.landmark]
-                    x, y = max(min(xs), 0), max(min(ys) - 10, 20)
+        # Downscale na spracovanie (Scale %)
+        scale = proc_scale / 100.0
+        if scale < 1.0:
+            proc = cv2.resize(frame, (int(W * scale), int(H * scale)), interpolation=cv2.INTER_AREA)
+        else:
+            proc = frame
 
-                    put_text(frame, f"{label}: {count}", (x, y), scale=0.8, color=(0, 255, 255))
+        # MediaPipe chce RGB
+        rgb = cv2.cvtColor(proc, cv2.COLOR_BGR2RGB)
+        rgb.flags.writeable = False
+        hres = hands.process(rgb) if hands else None
+        fres = face.process(rgb) if face else None
+        rgb.flags.writeable = True
 
-            # FPS (vyhladené jednoduchým priemerom)
-            now = time.time()
-            dt = now - prev_time
-            prev_time = now
-            if dt > 0:
-                fps = 0.9 * fps + 0.1 * (1.0 / dt)
+        # Kreslenie rúk + počty prstov
+        total = 0
+        if hres and hres.multi_hand_landmarks:
+            for lm, handed in zip(hres.multi_hand_landmarks, hres.multi_handedness):
+                label = handed.classification[0].label  # 'Left' / 'Right'
+                count = count_fingers(lm.landmark, label)
+                total += count
 
-            put_text(frame, f"Total: {total}", (12, 36), scale=1.0)
-            put_text(frame, f"FPS: {fps:.1f}", (12, 68), scale=0.8, color=(0, 200, 255))
+                mp_draw.draw_landmarks(
+                    frame,
+                    lm,
+                    mp_hands.HAND_CONNECTIONS,
+                    mp_draw.DrawingSpec(color=(0, 255, 0), thickness=draw_th, circle_radius=max(1, draw_th - 1)),
+                    mp_draw.DrawingSpec(color=(255, 255, 255), thickness=draw_th),
+                )
 
-            cv2.imshow("Hand tracking - skeleton + per-hand finger count (q to quit)", frame)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
+                xs = [int(p.x * W) for p in lm.landmark]
+                ys = [int(p.y * H) for p in lm.landmark]
+                x, y = max(min(xs), 10), max(min(ys) - 10, 20)
+                put_text(frame, f"{label}: {count}", (x, y), scale=0.7, color=(0, 255, 255), thick=2)
 
+        # Kreslenie Face Mesh (voliteľné)
+        if fres and fres.multi_face_landmarks:
+            for face_lm in fres.multi_face_landmarks:
+                mp_draw.draw_landmarks(
+                    frame,
+                    face_lm,
+                    mp_face.FACEMESH_TESSELATION,
+                    mp_draw.DrawingSpec(color=(0, 150, 255), thickness=max(1, draw_th - 1), circle_radius=1),
+                    mp_draw.DrawingSpec(color=(255, 255, 255), thickness=max(1, draw_th - 1)),
+                )
+
+        # FPS
+        now = time.time()
+        dt = now - prev_t
+        prev_t = now
+        if dt > 0:
+            fps = 0.9 * fps + 0.1 * (1.0 / dt)
+
+        put_text(frame, f"Total: {total}", (12, 36), scale=1.0, color=(255, 255, 255), thick=2)
+        put_text(frame, f"FPS: {fps:.1f}", (12, 68), scale=0.8, color=(0, 200, 255), thick=2)
+
+        cv2.imshow("Ruky + (voliteľne) Face  —  stlač 'q' pre ukončenie", frame)
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
+
+    if hands:
+        hands.close()
+    if face:
+        face.close()
     cap.release()
     cv2.destroyAllWindows()
 
-
 if __name__ == "__main__":
-    import sys
-
-    idx = int(sys.argv[1]) if len(sys.argv) > 1 else 0
-    main(idx)
+    main()
