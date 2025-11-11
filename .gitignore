@@ -1,5 +1,6 @@
 @"
 .venv/
+.gitignore
 .claude/
 UPDATES.md
 __pycache__/
