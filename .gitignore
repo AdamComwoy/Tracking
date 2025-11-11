@@ -1,6 +1,7 @@
 @"
 .venv/
 .claude/
+UPDATES.md
 __pycache__/
 *.pyc
 .vscode/*
