@@ -6,7 +6,7 @@ import mediapipe as mp
 mp_hands = mp.solutions.hands
 mp_face = mp.solutions.face_mesh
 mp_draw = mp.solutions.drawing_utils
-
+#awdoanwdawod 
 # ---------- UI: trackbary ----------
 def on_trackbar(_=None):
     pass
