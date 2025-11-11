@@ -96,9 +96,35 @@ The application provides 6 real-time adjustable controls:
 - **Labels**: Hand type (Left/Right) with finger count
 - **HUD**: Total fingers count and FPS in top-left corner
 
+## Code Architecture
+
+The application follows Object-Oriented Programming principles with a modular design:
+
+### Core Classes
+
+- **`ControlPanel`** - Manages UI trackbars and parameter controls
+- **`MediaPipeDetector`** - Handles MediaPipe hand and face detection models
+- **`HandGestureAnalyzer`** - Analyzes hand landmarks and counts fingers
+- **`Renderer`** - Responsible for all drawing and visualization operations
+- **`HandFaceTracker`** - Main application orchestrator, manages the tracking loop
+
+### Benefits
+
+- **Modularity**: Each class has a single, well-defined responsibility
+- **Maintainability**: Easy to modify or extend individual components
+- **Reusability**: Components can be imported and used in other projects
+- **Testability**: Classes can be unit tested independently
+- **Clean Code**: No global variables, proper encapsulation, and clear interfaces
+
 ## Project Status
 
-Currently on branch `feat/face-tracking` with recent additions:
+**Latest Update: OOP Refactoring (2025-11-11)**
+- Complete rewrite using Object-Oriented Programming
+- 5 well-defined classes with clear responsibilities
+- Improved code organization and maintainability
+- Added comprehensive docstrings and type hints
+
+**Previous Updates:**
 - Face tracking feature
 - Finger count overlay
 - Thicker skeleton visualization
@@ -107,4 +133,3 @@ Currently on branch `feat/face-tracking` with recent additions:
 ---
 
 *Built with MediaPipe and OpenCV*
->>>>>>> feat/face-tracking
