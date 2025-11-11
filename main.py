@@ -13,6 +13,7 @@ class AppConfig:
     tracking_confidence: float = 0.5
     max_hands: int = 2
     face_enabled: bool = True
+    face_skeleton_visible: bool = True
     processing_scale: int = 60
     draw_thickness: int = 2
     deepfake_enabled: bool = False
@@ -20,161 +21,477 @@ class AppConfig:
 
 
 class UnifiedUI:
-    """Manages unified UI with video and side panel controls."""
+    """Manages UI with separate video and control panel windows."""
 
-    def __init__(self, video_width: int = 1280, video_height: int = 720):
+    def __init__(self, video_width: int = 1920, video_height: int = 1080):
         self.video_width = video_width
         self.video_height = video_height
-        self.control_width = 350
-        self.total_width = video_width + self.control_width
-        self.total_height = video_height
-        
-        self.window_name = "Hand & Face Tracker with Deepfake"
+        self.control_width = 400  # Initial size
+        self.control_height = 950  # Increased for sliders
+        self.min_control_width = 300
+        self.min_control_height = 700
+
+        self.video_window = "Hand & Face Tracker - Video Feed"
+        self.control_window = "Control Dashboard"
         self.config = AppConfig()
-        
-        self._create_window()
-        self._create_trackbars()
 
-    def _create_window(self):
-        """Creates the unified window."""
-        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(self.window_name, self.total_width, self.total_height)
+        # Slider state management
+        self.sliders = {}
+        self.active_slider = None
+        self.mouse_down = False
 
-    def _create_trackbars(self):
-        """Creates all trackbars with default values."""
-        cv2.createTrackbar("Detection %", self.window_name, 50, 100, self._update_config)
-        cv2.createTrackbar("Tracking %", self.window_name, 50, 100, self._update_config)
-        cv2.createTrackbar("Max Hands", self.window_name, 2, 4, self._update_config)
-        cv2.createTrackbar("Face Mesh", self.window_name, 1, 1, self._update_config)
-        cv2.createTrackbar("Scale %", self.window_name, 60, 100, self._update_config)
-        cv2.createTrackbar("Thickness", self.window_name, 2, 5, self._update_config)
-        cv2.createTrackbar("Deepfake ON", self.window_name, 0, 1, self._update_config)
-        cv2.createTrackbar("Deepfake Mode", self.window_name, 0, 2, self._update_config)
+        self._create_windows()
+        self._setup_mouse_callback()
 
-    def _update_config(self, _):
-        """Update configuration from trackbar values."""
-        self.config.detection_confidence = cv2.getTrackbarPos("Detection %", self.window_name) / 100.0
-        self.config.tracking_confidence = cv2.getTrackbarPos("Tracking %", self.window_name) / 100.0
-        self.config.max_hands = max(1, cv2.getTrackbarPos("Max Hands", self.window_name))
-        self.config.face_enabled = bool(cv2.getTrackbarPos("Face Mesh", self.window_name))
-        self.config.processing_scale = max(30, cv2.getTrackbarPos("Scale %", self.window_name))
-        self.config.draw_thickness = max(1, cv2.getTrackbarPos("Thickness", self.window_name))
-        self.config.deepfake_enabled = bool(cv2.getTrackbarPos("Deepfake ON", self.window_name))
-        self.config.deepfake_mode = cv2.getTrackbarPos("Deepfake Mode", self.window_name)
+    @staticmethod
+    def draw_rounded_rect(img, pt1, pt2, color, thickness=-1, radius=10):
+        """Draw a rounded rectangle."""
+        x1, y1 = pt1
+        x2, y2 = pt2
 
-    def create_control_panel(self, info_text: dict) -> np.ndarray:
+        # Draw filled rectangle
+        if thickness == -1:
+            cv2.rectangle(img, (x1 + radius, y1), (x2 - radius, y2), color, -1)
+            cv2.rectangle(img, (x1, y1 + radius), (x2, y2 - radius), color, -1)
+
+            # Draw circles at corners
+            cv2.circle(img, (x1 + radius, y1 + radius), radius, color, -1)
+            cv2.circle(img, (x2 - radius, y1 + radius), radius, color, -1)
+            cv2.circle(img, (x1 + radius, y2 - radius), radius, color, -1)
+            cv2.circle(img, (x2 - radius, y2 - radius), radius, color, -1)
+        else:
+            # Draw rectangle outline
+            cv2.line(img, (x1 + radius, y1), (x2 - radius, y1), color, thickness)
+            cv2.line(img, (x1 + radius, y2), (x2 - radius, y2), color, thickness)
+            cv2.line(img, (x1, y1 + radius), (x1, y2 - radius), color, thickness)
+            cv2.line(img, (x2, y1 + radius), (x2, y2 - radius), color, thickness)
+
+            # Draw arcs at corners
+            cv2.ellipse(img, (x1 + radius, y1 + radius), (radius, radius), 180, 0, 90, color, thickness)
+            cv2.ellipse(img, (x2 - radius, y1 + radius), (radius, radius), 270, 0, 90, color, thickness)
+            cv2.ellipse(img, (x1 + radius, y2 - radius), (radius, radius), 90, 0, 90, color, thickness)
+            cv2.ellipse(img, (x2 - radius, y2 - radius), (radius, radius), 0, 0, 90, color, thickness)
+
+    @staticmethod
+    def draw_status_indicator(img, center, radius, is_on, scale=1.0):
+        """Draw a colored status indicator dot."""
+        radius = int(radius * scale)
+        if is_on:
+            # Green glowing effect
+            cv2.circle(img, center, radius + 2, (0, 100, 0), -1)
+            cv2.circle(img, center, radius, (50, 255, 50), -1)
+        else:
+            # Gray inactive
+            cv2.circle(img, center, radius + 2, (40, 40, 40), -1)
+            cv2.circle(img, center, radius, (100, 100, 100), -1)
+
+    def _create_windows(self):
+        """Creates separate windows for video and controls."""
+        # Video window - full size, resizable
+        cv2.namedWindow(self.video_window, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(self.video_window, self.video_width, self.video_height)
+
+        # Control window - resizable
+        cv2.namedWindow(self.control_window, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+        cv2.resizeWindow(self.control_window, self.control_width, self.control_height)
+
+    def _setup_mouse_callback(self):
+        """Setup mouse callback for slider interaction."""
+        cv2.setMouseCallback(self.control_window, self._mouse_callback)
+
+    def _mouse_callback(self, event, x, y, flags, param):
+        """Handle mouse events for slider interaction."""
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self.mouse_down = True
+            # Check if click is on any slider
+            for name, slider_info in self.sliders.items():
+                sx, sy, sw, sh = slider_info['rect']
+                if sx <= x <= sx + sw and sy - 10 <= y <= sy + sh + 10:
+                    self.active_slider = name
+                    self._update_slider_value(name, x, slider_info)
+                    break
+
+        elif event == cv2.EVENT_MOUSEMOVE:
+            if self.mouse_down and self.active_slider:
+                slider_info = self.sliders[self.active_slider]
+                self._update_slider_value(self.active_slider, x, slider_info)
+
+        elif event == cv2.EVENT_LBUTTONUP:
+            self.mouse_down = False
+            self.active_slider = None
+
+    def _update_slider_value(self, name, mouse_x, slider_info):
+        """Update slider value based on mouse position."""
+        sx, sy, sw, sh = slider_info['rect']
+        min_val, max_val = slider_info['range']
+
+        # Calculate normalized value (0.0 to 1.0)
+        normalized = max(0.0, min(1.0, (mouse_x - sx) / sw))
+
+        # Calculate actual value
+        if slider_info.get('integer', False):
+            value = int(min_val + normalized * (max_val - min_val))
+        else:
+            value = min_val + normalized * (max_val - min_val)
+
+        # Update config based on slider name
+        if name == "Detection":
+            self.config.detection_confidence = value
+        elif name == "Tracking":
+            self.config.tracking_confidence = value
+        elif name == "Max Hands":
+            self.config.max_hands = max(1, value)
+        elif name == "Scale":
+            self.config.processing_scale = max(30, value)
+        elif name == "Thickness":
+            self.config.draw_thickness = max(1, value)
+        elif name == "Face Mesh":
+            self.config.face_enabled = value > 0.5
+        elif name == "Face Skeleton":
+            self.config.face_skeleton_visible = value > 0.5
+        elif name == "Deepfake":
+            self.config.deepfake_enabled = value > 0.5
+        elif name == "DF Mode":
+            self.config.deepfake_mode = value
+
+    def draw_slider(self, panel, x, y, width, height, value, min_val, max_val,
+                   label, base_scale, name, integer=False):
         """
-        Create the side control panel with current settings.
-        
+        Draw an interactive slider.
+
+        Args:
+            panel: Image to draw on
+            x, y: Top-left position
+            width, height: Slider dimensions
+            value: Current value
+            min_val, max_val: Value range
+            label: Slider label
+            base_scale: Scale factor for responsive design
+            name: Slider identifier
+            integer: Whether value is integer
+        """
+        # Store slider info for mouse interaction
+        self.sliders[name] = {
+            'rect': (x, y, width, height),
+            'range': (min_val, max_val),
+            'integer': integer
+        }
+
+        font_scale = 0.45 * base_scale
+        thickness = max(1, int(1 * base_scale))
+
+        # Draw label
+        cv2.putText(panel, label, (x, y - 5),
+                   cv2.FONT_HERSHEY_SIMPLEX, font_scale, (200, 200, 200), thickness)
+
+        # Draw slider track (background)
+        track_color = (60, 60, 65)
+        cv2.rectangle(panel, (x, y), (x + width, y + height), track_color, -1)
+
+        # Calculate fill width based on value
+        normalized = (value - min_val) / (max_val - min_val) if max_val > min_val else 0
+        fill_width = int(width * normalized)
+
+        # Draw filled portion (active)
+        if fill_width > 0:
+            fill_color = (100, 180, 255)
+            cv2.rectangle(panel, (x, y), (x + fill_width, y + height), fill_color, -1)
+
+        # Draw slider handle
+        handle_x = x + fill_width
+        handle_color = (150, 220, 255) if self.active_slider == name else (200, 200, 200)
+        cv2.circle(panel, (handle_x, y + height // 2), int(8 * base_scale), handle_color, -1)
+        cv2.circle(panel, (handle_x, y + height // 2), int(9 * base_scale), (255, 255, 255), 1)
+
+        # Draw current value
+        if integer:
+            value_text = str(int(value))
+        else:
+            value_text = f"{value:.0%}" if max_val <= 1.0 else f"{value:.0f}%"
+
+        cv2.putText(panel, value_text, (x + width + 10, y + height - 2),
+                   cv2.FONT_HERSHEY_SIMPLEX, font_scale, (120, 200, 255),
+                   max(1, int(2 * base_scale)))
+
+    def draw_toggle(self, panel, x, y, width, height, value, label, base_scale, name):
+        """Draw an interactive toggle button."""
+        # Store as slider for interaction
+        self.sliders[name] = {
+            'rect': (x, y, width, height),
+            'range': (0, 1),
+            'integer': False
+        }
+
+        font_scale = 0.45 * base_scale
+        thickness = max(1, int(1 * base_scale))
+
+        # Draw label
+        cv2.putText(panel, label, (x, y - 5),
+                   cv2.FONT_HERSHEY_SIMPLEX, font_scale, (200, 200, 200), thickness)
+
+        # Toggle switch background
+        toggle_width = int(50 * base_scale)
+        toggle_height = int(24 * base_scale)
+        toggle_x = x
+        toggle_y = y
+
+        bg_color = (50, 200, 100) if value else (70, 70, 70)
+        self.draw_rounded_rect(panel, (toggle_x, toggle_y),
+                              (toggle_x + toggle_width, toggle_y + toggle_height),
+                              bg_color, -1, int(12 * base_scale))
+
+        # Toggle handle
+        handle_radius = int(10 * base_scale)
+        handle_x = toggle_x + toggle_width - handle_radius - 4 if value else toggle_x + handle_radius + 4
+        handle_y = toggle_y + toggle_height // 2
+        cv2.circle(panel, (handle_x, handle_y), handle_radius, (255, 255, 255), -1)
+
+        # Status text
+        status_text = "ON" if value else "OFF"
+        status_color = (100, 255, 100) if value else (150, 150, 150)
+        cv2.putText(panel, status_text, (toggle_x + toggle_width + 10, toggle_y + toggle_height - 4),
+                   cv2.FONT_HERSHEY_SIMPLEX, font_scale, status_color,
+                   max(1, int(2 * base_scale)))
+
+    def create_control_panel(self, info_text: dict, width: int = None, height: int = None) -> np.ndarray:
+        """
+        Create the control panel dashboard with interactive sliders and modern UI.
+
         Args:
             info_text: Dictionary with current application info
-            
+            width: Panel width (None = use default)
+            height: Panel height (None = use default)
+
         Returns:
             Control panel image
         """
-        panel = np.zeros((self.total_height, self.control_width, 3), dtype=np.uint8)
-        panel[:] = (40, 40, 40)  # Dark gray background
+        # Clear sliders for redraw
+        self.sliders.clear()
 
-        y_offset = 30
-        line_height = 35
-        
-        # Title
-        cv2.putText(panel, "CONTROLS", (20, y_offset), 
-                   cv2.FONT_HERSHEY_BOLD, 0.8, (255, 255, 255), 2)
-        y_offset += line_height + 10
-        
-        # Draw separator
-        cv2.line(panel, (20, y_offset), (self.control_width - 20, y_offset), 
-                (100, 100, 100), 1)
-        y_offset += 20
+        # Use provided dimensions or defaults
+        panel_width = max(width or self.control_width, self.min_control_width)
+        panel_height = max(height or self.control_height, self.min_control_height)
 
-        # Settings display
-        settings = [
-            ("Detection", f"{self.config.detection_confidence:.0%}"),
-            ("Tracking", f"{self.config.tracking_confidence:.0%}"),
-            ("Max Hands", f"{self.config.max_hands}"),
-            ("Face Mesh", "ON" if self.config.face_enabled else "OFF"),
-            ("Scale", f"{self.config.processing_scale}%"),
-            ("Thickness", f"{self.config.draw_thickness}"),
-            ("", ""),  # Spacer
-            ("Deepfake", "ON" if self.config.deepfake_enabled else "OFF"),
-            ("Mode", ["Blur", "Pixelate", "Swap"][self.config.deepfake_mode]),
-        ]
+        # Scale factors for responsive design
+        scale_x = panel_width / 400.0
+        scale_y = panel_height / 950.0
+        base_scale = min(scale_x, scale_y)
 
-        for label, value in settings:
-            if label:  # Skip spacers
-                cv2.putText(panel, label, (20, y_offset), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-                cv2.putText(panel, str(value), (200, y_offset), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 100), 1)
-            y_offset += line_height
+        # Responsive sizing
+        font_scale_title = 0.7 * base_scale
+        font_scale_section = 0.6 * base_scale
+        font_scale_text = 0.5 * base_scale
+        font_scale_small = 0.45 * base_scale
 
-        # Draw separator
-        y_offset += 10
-        cv2.line(panel, (20, y_offset), (self.control_width - 20, y_offset), 
-                (100, 100, 100), 1)
-        y_offset += 30
+        thickness_bold = max(1, int(2 * base_scale))
+        thickness_normal = max(1, int(1 * base_scale))
 
-        # Info display
-        cv2.putText(panel, "INFO", (20, y_offset), 
-                   cv2.FONT_HERSHEY_BOLD, 0.8, (255, 255, 255), 2)
-        y_offset += line_height
+        slider_height = int(12 * base_scale)
+        line_spacing = int(35 * scale_y)
+        margin_x = int(20 * scale_x)
+        card_padding = int(15 * scale_x)
+        slider_width = int((panel_width - 2 * margin_x - 2 * card_padding - 60) * 0.85)
+
+        # Modern dark background with gradient effect
+        panel = np.zeros((panel_height, panel_width, 3), dtype=np.uint8)
+        for i in range(panel_height):
+            blend = i / panel_height
+            color = int(25 + blend * 15)
+            panel[i, :] = (color, color, color)
+
+        y_offset = int(25 * scale_y)
+
+        # Title with glow effect
+        title_y = y_offset
+        cv2.putText(panel, "CONTROL DASHBOARD", (margin_x + 2, title_y + 2),
+                   cv2.FONT_HERSHEY_DUPLEX, font_scale_title, (30, 30, 30), thickness_bold + 1)
+        cv2.putText(panel, "CONTROL DASHBOARD", (margin_x, title_y),
+                   cv2.FONT_HERSHEY_DUPLEX, font_scale_title, (255, 255, 255), thickness_bold)
+        y_offset += int(45 * scale_y)
+
+        # Settings Card with Interactive Sliders
+        card_y_start = y_offset
+        card_height = int(370 * scale_y)
+        self.draw_rounded_rect(panel, (margin_x, card_y_start),
+                              (panel_width - margin_x, card_y_start + card_height),
+                              (45, 45, 48), -1, int(12 * base_scale))
+
+        y_offset += int(22 * scale_y)
+        cv2.putText(panel, "SETTINGS", (margin_x + card_padding, y_offset),
+                   cv2.FONT_HERSHEY_DUPLEX, font_scale_section, (120, 200, 255), thickness_bold)
+        y_offset += int(30 * scale_y)
+
+        # Interactive sliders
+        slider_x = margin_x + card_padding
+
+        # Detection confidence slider
+        self.draw_slider(panel, slider_x, y_offset, slider_width, slider_height,
+                        self.config.detection_confidence, 0.0, 1.0,
+                        "Detection Confidence", base_scale, "Detection")
+        y_offset += line_spacing
+
+        # Tracking confidence slider
+        self.draw_slider(panel, slider_x, y_offset, slider_width, slider_height,
+                        self.config.tracking_confidence, 0.0, 1.0,
+                        "Tracking Confidence", base_scale, "Tracking")
+        y_offset += line_spacing
+
+        # Max hands slider
+        self.draw_slider(panel, slider_x, y_offset, slider_width, slider_height,
+                        self.config.max_hands, 1, 4,
+                        "Max Hands", base_scale, "Max Hands", integer=True)
+        y_offset += line_spacing
+
+        # Processing scale slider
+        self.draw_slider(panel, slider_x, y_offset, slider_width, slider_height,
+                        self.config.processing_scale, 30, 100,
+                        "Processing Scale", base_scale, "Scale", integer=True)
+        y_offset += line_spacing
+
+        # Draw thickness slider
+        self.draw_slider(panel, slider_x, y_offset, slider_width, slider_height,
+                        self.config.draw_thickness, 1, 5,
+                        "Draw Thickness", base_scale, "Thickness", integer=True)
+        y_offset += line_spacing
+
+        # Toggle switches
+        y_offset += int(10 * scale_y)
+        toggle_spacing = int(32 * scale_y)
+
+        # Face Mesh toggle
+        self.draw_toggle(panel, slider_x, y_offset, 50, 24,
+                        self.config.face_enabled, "Face Mesh Detection", base_scale, "Face Mesh")
+        y_offset += toggle_spacing
+
+        # Face Skeleton toggle
+        self.draw_toggle(panel, slider_x, y_offset, 50, 24,
+                        self.config.face_skeleton_visible, "Face Skeleton Visible", base_scale, "Face Skeleton")
+        y_offset += toggle_spacing
+
+        # Deepfake Card
+        y_offset = card_y_start + card_height + int(15 * scale_y)
+        card_y_start = y_offset
+        card_height = int(130 * scale_y)
+        self.draw_rounded_rect(panel, (margin_x, card_y_start),
+                              (panel_width - margin_x, card_y_start + card_height),
+                              (48, 42, 45), -1, int(12 * base_scale))
+
+        y_offset += int(22 * scale_y)
+        cv2.putText(panel, "DEEPFAKE", (margin_x + card_padding, y_offset),
+                   cv2.FONT_HERSHEY_DUPLEX, font_scale_section, (255, 150, 80), thickness_bold)
+        y_offset += int(30 * scale_y)
+
+        # Deepfake enable toggle
+        self.draw_toggle(panel, slider_x, y_offset, 50, 24,
+                        self.config.deepfake_enabled, "Deepfake Enabled", base_scale, "Deepfake")
+        y_offset += toggle_spacing + int(5 * scale_y)
+
+        # Deepfake mode slider
+        self.draw_slider(panel, slider_x, y_offset, slider_width, slider_height,
+                        self.config.deepfake_mode, 0, 2,
+                        "Mode (0:Blur 1:Pixel 2:Swap)", base_scale, "DF Mode", integer=True)
+        y_offset += line_spacing
+
+        # Live Info Card
+        y_offset = card_y_start + card_height + int(15 * scale_y)
+        card_y_start = y_offset
+        card_height = int(170 * scale_y)
+        self.draw_rounded_rect(panel, (margin_x, card_y_start),
+                              (panel_width - margin_x, card_y_start + card_height),
+                              (42, 48, 45), -1, int(12 * base_scale))
+
+        y_offset += int(22 * scale_y)
+        cv2.putText(panel, "LIVE INFO", (margin_x + card_padding, y_offset),
+                   cv2.FONT_HERSHEY_DUPLEX, font_scale_section, (100, 255, 180), thickness_bold)
+        y_offset += int(28 * scale_y)
 
         info_items = [
-            ("FPS", f"{info_text.get('fps', 0):.1f}"),
-            ("Fingers", str(info_text.get('fingers', 0))),
-            ("Hands", str(info_text.get('hands', 0))),
-            ("Faces", str(info_text.get('faces', 0))),
+            ("FPS", f"{info_text.get('fps', 0):.1f}", (150, 200, 255)),
+            ("Total Fingers", str(info_text.get('fingers', 0)), (255, 200, 100)),
+            ("Hands Detected", str(info_text.get('hands', 0)), (150, 255, 150)),
+            ("Faces Detected", str(info_text.get('faces', 0)), (255, 150, 200)),
         ]
 
-        for label, value in info_items:
-            cv2.putText(panel, label, (20, y_offset), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-            cv2.putText(panel, str(value), (200, y_offset), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 200, 255), 1)
-            y_offset += line_height
+        for label, value, color in info_items:
+            cv2.putText(panel, label, (margin_x + card_padding, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, font_scale_text, (200, 200, 200), thickness_normal)
 
-        # Instructions at bottom
-        y_offset = self.total_height - 100
-        cv2.putText(panel, "CONTROLS:", (20, y_offset), 
-                   cv2.FONT_HERSHEY_BOLD, 0.6, (255, 200, 100), 1)
-        y_offset += 25
-        
-        instructions = [
-            "Q - Quit",
-            "S - Screenshot",
-            "R - Reset"
+            # Value with colored background
+            value_x = panel_width - margin_x - card_padding - 60
+            cv2.rectangle(panel, (value_x - 5, y_offset - 15),
+                         (value_x + 50, y_offset + 5), (30, 30, 35), -1)
+            cv2.putText(panel, value, (value_x, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, font_scale_text, color, thickness_bold)
+            y_offset += int(32 * scale_y)
+
+        # Keyboard Shortcuts Card
+        y_offset = card_y_start + card_height + int(15 * scale_y)
+        card_y_start = y_offset
+        card_height = int(130 * scale_y)
+        self.draw_rounded_rect(panel, (margin_x, card_y_start),
+                              (panel_width - margin_x, card_y_start + card_height),
+                              (40, 45, 50), -1, int(12 * base_scale))
+
+        y_offset += int(22 * scale_y)
+        cv2.putText(panel, "SHORTCUTS", (margin_x + card_padding, y_offset),
+                   cv2.FONT_HERSHEY_DUPLEX, font_scale_section, (255, 220, 100), thickness_bold)
+        y_offset += int(28 * scale_y)
+
+        shortcuts = [
+            ("Q", "Quit Application"),
+            ("S", "Save Screenshot"),
+            ("R", "Reset Stored Face")
         ]
-        
-        for instruction in instructions:
-            cv2.putText(panel, instruction, (20, y_offset), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
-            y_offset += 22
+
+        for key, desc in shortcuts:
+            # Draw key badge
+            key_x = margin_x + card_padding
+            self.draw_rounded_rect(panel, (key_x, y_offset - 15),
+                                  (key_x + 25, y_offset + 5),
+                                  (70, 70, 80), -1, int(5 * base_scale))
+            cv2.putText(panel, key, (key_x + 5, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, font_scale_text, (255, 255, 255), thickness_bold)
+
+            # Description
+            cv2.putText(panel, desc, (key_x + 35, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, font_scale_small, (180, 180, 180), thickness_normal)
+            y_offset += int(28 * scale_y)
 
         return panel
 
-    def combine_frame_and_panel(self, frame: np.ndarray, info: dict) -> np.ndarray:
+    def show_frame_and_panel(self, frame: np.ndarray, info: dict):
         """
-        Combine video frame with control panel.
+        Display video frame and control panel in separate windows.
         
         Args:
             frame: Video frame
             info: Info dictionary for panel
-            
-        Returns:
-            Combined image
         """
-        # Resize frame if needed
+        # Resize frame to target resolution if needed
         if frame.shape[:2] != (self.video_height, self.video_width):
             frame = cv2.resize(frame, (self.video_width, self.video_height))
         
-        # Create panel
-        panel = self.create_control_panel(info)
+        # Get actual control window size (in case user resized it)
+        try:
+            # Try to get window rect (not all OpenCV builds support this)
+            rect = cv2.getWindowImageRect(self.control_window)
+            if rect[2] > 0 and rect[3] > 0:
+                actual_width = rect[2]
+                actual_height = rect[3]
+            else:
+                actual_width = self.control_width
+                actual_height = self.control_height
+        except:
+            # Fallback to default size
+            actual_width = self.control_width
+            actual_height = self.control_height
         
-        # Combine horizontally
-        combined = np.hstack([frame, panel])
+        # Create panel with actual size
+        panel = self.create_control_panel(info, actual_width, actual_height)
         
-        return combined
+        # Display in separate windows
+        cv2.imshow(self.video_window, frame)
+        cv2.imshow(self.control_window, panel)
 
 
 class MediaPipeDetector:
@@ -510,37 +827,39 @@ class Renderer:
 
         return total_fingers, num_hands
 
-    def draw_face(self, frame, face_results, draw_thickness: int) -> int:
+    def draw_face(self, frame, face_results, draw_thickness: int, draw_skeleton: bool = True) -> int:
         """
         Draw face mesh on frame.
-        
+
         Args:
             frame: Image to draw on
             face_results: MediaPipe face detection results
             draw_thickness: Thickness of drawing lines
-            
+            draw_skeleton: Whether to draw the face skeleton/mesh
+
         Returns:
             Number of faces detected
         """
         num_faces = 0
-        
+
         if not face_results or not face_results.multi_face_landmarks:
             return num_faces
 
         num_faces = len(face_results.multi_face_landmarks)
 
-        for face_landmarks in face_results.multi_face_landmarks:
-            self.mp_draw.draw_landmarks(
-                frame,
-                face_landmarks,
-                self.mp_face.FACEMESH_TESSELATION,
-                self.mp_draw.DrawingSpec(color=(0, 150, 255),
-                                        thickness=max(1, draw_thickness - 1),
-                                        circle_radius=1),
-                self.mp_draw.DrawingSpec(color=(255, 255, 255),
-                                        thickness=max(1, draw_thickness - 1)),
-            )
-        
+        if draw_skeleton:
+            for face_landmarks in face_results.multi_face_landmarks:
+                self.mp_draw.draw_landmarks(
+                    frame,
+                    face_landmarks,
+                    self.mp_face.FACEMESH_TESSELATION,
+                    self.mp_draw.DrawingSpec(color=(0, 150, 255),
+                                            thickness=max(1, draw_thickness - 1),
+                                            circle_radius=1),
+                    self.mp_draw.DrawingSpec(color=(255, 255, 255),
+                                            thickness=max(1, draw_thickness - 1)),
+                )
+
         return num_faces
 
 
@@ -568,9 +887,14 @@ class HandFaceTracker:
             print(f"Cannot open camera (index {self.camera_index}).")
             return False
 
-        # Set higher resolution
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        # Set 1920x1080 resolution
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        
+        # Verify actual resolution
+        actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        print(f"Camera resolution: {actual_width}x{actual_height}")
 
         return True
 
@@ -647,7 +971,7 @@ class HandFaceTracker:
                     frame, hand_results, config.draw_thickness
                 )
                 num_faces = self.renderer.draw_face(
-                    frame, face_results, config.draw_thickness
+                    frame, face_results, config.draw_thickness, config.face_skeleton_visible
                 )
 
                 # Update FPS
@@ -661,18 +985,15 @@ class HandFaceTracker:
                     'faces': num_faces
                 }
 
-                # Combine frame with control panel
-                display = self.ui.combine_frame_and_panel(frame, info)
-
-                # Display
-                cv2.imshow(self.ui.window_name, display)
+                # Display in separate windows
+                self.ui.show_frame_and_panel(frame, info)
 
                 # Handle keyboard input
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
                     break
                 elif key == ord('s'):
-                    self._save_screenshot(display)
+                    self._save_screenshot(frame)
                 elif key == ord('r'):
                     self.stored_face = None
                     print("Reset: Stored face cleared")
